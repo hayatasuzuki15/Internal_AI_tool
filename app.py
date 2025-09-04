@@ -100,6 +100,12 @@ def init_session_state() -> None:
         st.session_state.last_web_error = None
     if "last_image_error" not in st.session_state:
         st.session_state.last_image_error = None
+    # Tool mode (AIツール / 応用ツール)
+    if "tool_mode" not in st.session_state:
+        st.session_state.tool_mode = "AIツール"
+    # 応用ツール用のモック結果テキスト
+    if "applied_result_text" not in st.session_state:
+        st.session_state.applied_result_text = ""
 
 
 def nl_join(s: str, newline: str) -> str:
@@ -344,7 +350,11 @@ def handle_user_message(user_text: str) -> None:
 # UI Components
 # -----------------------------
 def sidebar_settings() -> None:
-    pass
+    st.sidebar.markdown("### ツール選択")
+    options = ["AIツール", "応用ツール"]
+    default_index = options.index(st.session_state.tool_mode) if st.session_state.get("tool_mode") in options else 0
+    # ウィジェットが同じ key を管理するため、ここで session_state に再代入しない
+    st.sidebar.radio("カテゴリー", options=options, index=default_index, key="tool_mode")
     # st.sidebar.markdown("### AIチャット設定")
     # モデル選択は設定タブへ移動、RAG設定はAIチャットタブに移動
 
@@ -491,6 +501,58 @@ def ui_ai_chat() -> None:
             st.session_state.messages.clear()
             st.session_state.prev_response_id = None
 
+
+def ui_applied_tools() -> None:
+    """応用ツールのモック画面。
+    - ファイル入力×3
+    - 結果表示エリア
+    - 結果ダウンロードボタン
+    実処理は未実装のため、ボタンでモックの結果を生成します。
+    """
+    st.subheader("応用ツール（モック）")
+
+    st.markdown("作業ファイルを3つまで指定してください（処理は未実装のモックです）。")
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        f1 = st.file_uploader("入力ファイル 1", key="applied_file_1")
+    with col2:
+        f2 = st.file_uploader("入力ファイル 2", key="applied_file_2")
+    with col3:
+        f3 = st.file_uploader("入力ファイル 3", key="applied_file_3")
+
+    st.markdown("---")
+
+    c1, c2 = st.columns([1, 3])
+    with c1:
+        if st.button("結果を生成（モック）", key="applied_generate_mock"):
+            names = []
+            for f in (f1, f2, f3):
+                names.append(f.name if f else "(なし)")
+            st.session_state.applied_result_text = (
+                "モック結果\n"
+                + f"ファイル1: {names[0]}\n"
+                + f"ファイル2: {names[1]}\n"
+                + f"ファイル3: {names[2]}\n\n"
+                + "ここに生成結果が表示されます。\n（この画面では処理はまだ実装していません）"
+            )
+    with c2:
+        st.download_button(
+            label="結果をダウンロード",
+            data=(st.session_state.applied_result_text or "").encode("utf-8"),
+            file_name="mock_result.txt",
+            mime="text/plain",
+            disabled=not bool(st.session_state.applied_result_text),
+            key="applied_download_btn",
+        )
+
+    st.markdown("#### 結果表示エリア")
+    st.text_area(
+        "結果",
+        value=st.session_state.applied_result_text or "ここに結果が表示されます。",
+        height=220,
+        key="applied_result_area",
+    )
 
 def ui_web_search() -> None:
     st.subheader("Web検索（gpt-5-mini固定）")
@@ -729,6 +791,10 @@ def main() -> None:
 
     st.sidebar.header("AIツール")
     sidebar_settings()
+    # 応用ツールが選択されている場合は専用画面を表示
+    if st.session_state.get("tool_mode") == "応用ツール":
+        ui_applied_tools()
+        return
 
     tabs = st.tabs(["AIチャット", "Web検索", "画像生成", "RAG管理", "設定"])
     with tabs[0]:
