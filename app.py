@@ -1,8 +1,9 @@
-import os
+﻿import os
 import io
 import json
 import time
 import base64
+import difflib
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 
@@ -83,7 +84,7 @@ def init_session_state() -> None:
     if "download_format" not in st.session_state:
         st.session_state.download_format = "md"  # md | json | txt
     if "newline" not in st.session_state:
-        st.session_state.newline = "LF"  # LF | CRLF
+        st.session_state.newline = "CRLF"  # LF | CRLF
     if "prev_response_id" not in st.session_state:
         st.session_state.prev_response_id: Optional[str] = None
     if "web_is_generating" not in st.session_state:
@@ -106,6 +107,35 @@ def init_session_state() -> None:
     # 応用ツール用のモック結果テキスト
     if "applied_result_text" not in st.session_state:
         st.session_state.applied_result_text = ""
+
+    # コード改修ツール用ステート
+    if "code_fix_model" not in st.session_state:
+        st.session_state.code_fix_model = normalize_model_for_ui(DEFAULT_MODEL_RAW)
+    if "code_fix_prompt_step1" not in st.session_state:
+        st.session_state.code_fix_prompt_step1 = (
+            "あなたはシステム設計レビューの専門家です。\n"
+            "与えられた『改修前の設計書』と『改修後の設計書』の差分を日本語で簡潔に要約してください。\n"
+            "出力は以下のセクションを含む箇条書きにしてください:\n"
+            "- 追加された仕様\n- 変更された仕様\n- 削除された仕様\n- 影響範囲（関数/クラス/テーブル/入出力）\n"
+            "不明な点があれば推測せず『不明』と明記してください。"
+        )
+    if "code_fix_prompt_step2" not in st.session_state:
+        st.session_state.code_fix_prompt_step2 = (
+            "あなたは熟練のソフトウェアエンジニアです。\n"
+            "以下の『変更点の要約』に基づいて、与えられたソースコード全体を改修してください。\n"
+            "出力はコードのみ（ファイル全体）を返し、説明文やコードブロック記号は含めないでください。\n"
+            "指定がない箇所は変更せず、仕様が曖昧な場合はTODOコメントを残してください。"
+        )
+    if "code_fix_is_running" not in st.session_state:
+        st.session_state.code_fix_is_running = False
+    if "code_fix_summary" not in st.session_state:
+        st.session_state.code_fix_summary = ""
+    if "code_fix_modified_code" not in st.session_state:
+        st.session_state.code_fix_modified_code = ""
+    if "code_fix_diff" not in st.session_state:
+        st.session_state.code_fix_diff = ""
+    if "code_fix_last_error" not in st.session_state:
+        st.session_state.code_fix_last_error = None
 
 
 def nl_join(s: str, newline: str) -> str:
@@ -351,7 +381,7 @@ def handle_user_message(user_text: str) -> None:
 # -----------------------------
 def sidebar_settings() -> None:
     st.sidebar.markdown("### ツール選択")
-    options = ["AIツール", "応用ツール"]
+    options = ["AIツール", "コード改修ツール"]
     default_index = options.index(st.session_state.tool_mode) if st.session_state.get("tool_mode") in options else 0
     # ウィジェットが同じ key を管理するため、ここで session_state に再代入しない
     st.sidebar.radio("カテゴリー", options=options, index=default_index, key="tool_mode")
@@ -503,56 +533,166 @@ def ui_ai_chat() -> None:
 
 
 def ui_applied_tools() -> None:
-    """応用ツールのモック画面。
-    - ファイル入力×3
-    - 結果表示エリア
-    - 結果ダウンロードボタン
-    実処理は未実装のため、ボタンでモックの結果を生成します。
-    """
-    st.subheader("応用ツール（モック）")
+    """コード改修ツール（実装）。"""
+    st.subheader("コード改修ツール")
 
-    st.markdown("作業ファイルを3つまで指定してください（処理は未実装のモックです）。")
+    # Helpers
+    def _read_uploaded_text(uf) -> str:
+        if not uf:
+            return ""
+        try:
+            return uf.getvalue().decode("utf-8")
+        except Exception:
+            return uf.getvalue().decode("utf-8", errors="ignore")
 
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        f1 = st.file_uploader("入力ファイル 1", key="applied_file_1")
-    with col2:
-        f2 = st.file_uploader("入力ファイル 2", key="applied_file_2")
-    with col3:
-        f3 = st.file_uploader("入力ファイル 3", key="applied_file_3")
+    def _strip_code_fences(s: str) -> str:
+        t = s.strip()
+        if t.startswith("```") and t.endswith("```"):
+            t = t[3:]
+            if "\n" in t:
+                t = t.split("\n", 1)[1]
+            t = t.rsplit("```", 1)[0] if t.endswith("```") else t
+        return t
 
-    st.markdown("---")
+    def _unified_diff(src: str, dst: str, src_name: str) -> str:
+        to_name = f"modified_{src_name}" if src_name else "modified_code"
+        diff = difflib.unified_diff(
+            src.splitlines(),
+            dst.splitlines(),
+            fromfile=src_name or "original",
+            tofile=to_name,
+            lineterm="",
+        )
+        return "\n".join(diff)
 
-    c1, c2 = st.columns([1, 3])
-    with c1:
-        if st.button("結果を生成（モック）", key="applied_generate_mock"):
-            names = []
-            for f in (f1, f2, f3):
-                names.append(f.name if f else "(なし)")
-            st.session_state.applied_result_text = (
-                "モック結果\n"
-                + f"ファイル1: {names[0]}\n"
-                + f"ファイル2: {names[1]}\n"
-                + f"ファイル3: {names[2]}\n\n"
-                + "ここに生成結果が表示されます。\n（この画面では処理はまだ実装していません）"
-            )
-    with c2:
-        st.download_button(
-            label="結果をダウンロード",
-            data=(st.session_state.applied_result_text or "").encode("utf-8"),
-            file_name="mock_result.txt",
-            mime="text/plain",
-            disabled=not bool(st.session_state.applied_result_text),
-            key="applied_download_btn",
+    tabs = st.tabs(["実行", "設定"])
+
+    # 設定タブ
+    with tabs[1]:
+        st.markdown("#### モデル設定")
+        st.selectbox(
+            "モデル",
+            options=MODEL_OPTIONS,
+            index=MODEL_OPTIONS.index(st.session_state.code_fix_model)
+            if st.session_state.code_fix_model in MODEL_OPTIONS
+            else MODEL_OPTIONS.index(normalize_model_for_ui(DEFAULT_MODEL_RAW)),
+            key="code_fix_model",
         )
 
-    st.markdown("#### 結果表示エリア")
-    st.text_area(
-        "結果",
-        value=st.session_state.applied_result_text or "ここに結果が表示されます。",
-        height=220,
-        key="applied_result_area",
-    )
+        st.markdown("#### プロンプト設定（Step1: 設計差分抽出）")
+        st.text_area(
+            "Step1 プロンプト",
+            value=st.session_state.code_fix_prompt_step1,
+            height=180,
+            key="code_fix_prompt_step1",
+        )
+
+        st.markdown("#### プロンプト設定（Step2: コード改修）")
+        st.text_area(
+            "Step2 プロンプト",
+            value=st.session_state.code_fix_prompt_step2,
+            height=220,
+            key="code_fix_prompt_step2",
+        )
+
+    # 実行タブ
+    with tabs[0]:
+        if st.session_state.code_fix_last_error:
+            st.info(f"エラー: {st.session_state.code_fix_last_error}")
+
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            f_code = st.file_uploader("入力ファイル（コード）", type=["py", "sql"], key="code_fix_file_code")
+        with c2:
+            f_before = st.file_uploader("設計書（改修前）", type=["txt", "md"], key="code_fix_file_before")
+        with c3:
+            f_after = st.file_uploader("設計書（改修後）", type=["txt", "md"], key="code_fix_file_after")
+
+        run = st.button("一括実行", disabled=st.session_state.code_fix_is_running)
+
+        if run:
+            if not (f_code and f_before and f_after):
+                st.warning("3つの入力ファイルすべてを指定してください。")
+            else:
+                st.session_state.code_fix_is_running = True
+                st.session_state.code_fix_last_error = None
+                try:
+                    # 読み込み
+                    code_text = _read_uploaded_text(f_code)
+                    before_text = _read_uploaded_text(f_before)
+                    after_text = _read_uploaded_text(f_after)
+
+                    # Step1: 設計差分抽出
+                    client = get_client()
+                    step1_input = [
+                        {"role": "system", "content": st.session_state.code_fix_prompt_step1},
+                        {
+                            "role": "user",
+                            "content": (
+                                "[改修前の設計書]\n" + before_text + "\n\n" +
+                                "[改修後の設計書]\n" + after_text
+                            ),
+                        },
+                    ]
+                    resp1 = client.responses.create(
+                        model=resolve_model_for_api(st.session_state.code_fix_model),
+                        input=step1_input,
+                    )
+                    summary = getattr(resp1, "output_text", None) or ""
+                    st.session_state.code_fix_summary = summary
+
+                    # Step2: コード改修
+                    step2_input = [
+                        {"role": "system", "content": st.session_state.code_fix_prompt_step2},
+                        {
+                            "role": "user",
+                            "content": (
+                                "[変更点の要約]\n" + summary + "\n\n" +
+                                "[元のコード]\n" + code_text
+                            ),
+                        },
+                    ]
+                    resp2 = client.responses.create(
+                        model=resolve_model_for_api(st.session_state.code_fix_model),
+                        input=step2_input,
+                    )
+                    modified = getattr(resp2, "output_text", None) or ""
+                    modified = _strip_code_fences(modified)
+                    st.session_state.code_fix_modified_code = modified
+
+                    # Diff
+                    diff_text = _unified_diff(code_text, modified, f_code.name)
+                    st.session_state.code_fix_diff = diff_text
+                except Exception as e:
+                    st.session_state.code_fix_last_error = str(e)
+                finally:
+                    st.session_state.code_fix_is_running = False
+
+        # 結果表示
+        if st.session_state.code_fix_summary:
+            st.markdown("### 変更点の要約")
+            st.text_area("要約", value=st.session_state.code_fix_summary, height=200, key="code_fix_summary_view")
+
+        if st.session_state.code_fix_diff:
+            st.markdown("### コード差分")
+            st.code(st.session_state.code_fix_diff, language="diff")
+
+        if st.session_state.code_fix_modified_code:
+            st.markdown("### 修正後コード")
+            ext = "py" if (f_code and f_code.name.lower().endswith(".py")) else "sql"
+            lang = "python" if ext == "py" else "sql"
+            st.code(st.session_state.code_fix_modified_code, language=lang)
+
+            # Download
+            base_name = f_code.name if f_code else ("code.py" if ext == "py" else "code.sql")
+            out_name = f"modified_{base_name}"
+            st.download_button(
+                label="修正後コードをダウンロード",
+                data=st.session_state.code_fix_modified_code.encode("utf-8"),
+                file_name=out_name,
+                mime="text/plain",
+                key="code_fix_download_btn",
+            )
 
 def ui_web_search() -> None:
     st.subheader("Web検索（gpt-5-mini固定）")
@@ -767,7 +907,7 @@ def ui_settings() -> None:
 
     st.markdown("#### ダウンロード設定")
     st.session_state.download_format = st.selectbox("ファイルタイプ", ["md", "json", "txt"], key="settings_download_format")
-    st.session_state.newline = st.selectbox("改行コード", ["LF", "CRLF"], key="settings_newline")
+    st.session_state.newline = st.selectbox("改行コード", ["CRLF", "LF"], key="settings_newline")
 
     st.markdown("---")
     st.markdown("現在の設定:")
@@ -791,8 +931,8 @@ def main() -> None:
 
     st.sidebar.header("AIツール")
     sidebar_settings()
-    # 応用ツールが選択されている場合は専用画面を表示
-    if st.session_state.get("tool_mode") == "応用ツール":
+    # コード改修ツールが選択されている場合は専用画面を表示
+    if st.session_state.get("tool_mode") == "コード改修ツール":
         ui_applied_tools()
         return
 

@@ -1,56 +1,99 @@
-# Internal_AI_tool
-Internal AI Tool is a Streamlit app for AI chat with RAG and vector store management.
+﻿# Internal_AI_tool
+Internal AI Tool は、Streamlit 製の社内向け AI ツールです。チャット、Web 検索、画像生成、RAG 管理に加え、コード改修ツールを備えています。
 
-## 環境要件
+## 動作環境
 - Python: 3.11+
-- ライブラリ:
+- 依存パッケージ:
   - openai==1.76.0
   - streamlit==1.33.0
   - python-dotenv==1.1.1
 
 ## 環境変数 (.env)
-- `OPENAI_API_KEY` 必須
-- `DEFAULT_MODEL` 任意（既定: `gpt5-mini`）
+- `OPENAI_API_KEY`: OpenAI API キー（必須）
+- `DEFAULT_MODEL`: 既定のモデル ID またはフレンドリ名。省略時は `gpt-5-mini`
 
-## セットアップ
-1. 依存ライブラリをインストール
+フレンドリ名と実モデル ID の対応:
+- `gpt-5` → `gpt-5`
+- `gpt-5-mini` → `gpt-5-mini`
+- `gpt-5-nano` → `gpt-5-nano`
+- `o4-mini` → `o4-mini`
+
+`DEFAULT_MODEL` には上記いずれか、または実モデル ID を指定できます。
+
+## セットアップと起動
+1. 依存パッケージをインストール
    - `pip install -r requirements.txt`
-2. `.env` を用意し `OPENAI_API_KEY` を設定
+2. `.env` を用意（`OPENAI_API_KEY` を設定）
 3. 起動
    - `streamlit run app.py`
 
-## 機能
-- AIチャット: OpenAI Responses API で応答生成（ストリーミング対応）
-- RAG: Responses API の `file_search` ツール対応、ベクターストア複数選択
-- モデル切替: 既定は `gpt5-mini`、選択: `gpt5` / `gpt5-mini` / `gpt5-nano` / `o4-mini`
-- 入力固定: `st.chat_input` により画面下部固定
-- 生成中制御: 生成中は追加入力とダウンロードを無効化
-- ダウンロード: チャット履歴を `md` / `json` / `txt` で保存、LF/CRLF 選択
-- RAG管理: ベクターストアの作成・名称変更・削除、ファイル追加・削除
-- 一覧更新: ベクターストア/ファイル一覧の手動リフレッシュボタン
-- 設定: モデル、RAG使用、ストア選択、保存形式、改行コード（サイドバー下部）
-- Web検索: Built-in Web Search ツールを利用（モデル固定: gpt-5-mini）
-- 画像生成: 画像生成APIで画像を生成（モデル固定: gpt-5-nano 表示／内部は image モデルを使用）
+## 全体構成（サイドバー）
+- ツール選択: `AIツール` / `コード改修ツール`
 
-## レイアウト
-- サイドバー: 「AIツール」ヘッダー + RAG利用切替、ストア選択（複数可）
-- メイン: タブで「AIチャット」「Web検索」「画像生成」「RAG管理」「設定」
-  - AIチャット: チャット履歴表示、固定入力欄（画面最下部）、履歴ダウンロード/クリア
-  - Web検索: クエリ入力→検索→結果表示（ストリーミング）
-  - 画像生成: プロンプトとサイズを指定して生成
-  - 設定: モデル選択、ダウンロードのファイル種別と改行コード
+---
 
-## 非機能
-- 高速化: `st.session_state` と `st.cache_*` によるキャッシュ
-- 手動リフレッシュ: 一覧の「再読込」ボタンでキャッシュ刷新
-- エラー表示: 直前のエラーをUI上に保持表示
+## AIツール（タブ構成）
 
-## 注意
-- RAGのベクターストア/ファイル操作は OpenAI Vector Stores API を利用しています。
-- `file_search` ツールは `tools=[{"type": "file_search", "vector_store_ids": ["..."]}]` 形式で利用します。
-- モデル名は設定タブでフレンドリ名を選択（内部でOpenAI実モデルにマップ）。
-  - `gpt5` → `gpt-4o`
-  - `gpt5-mini` → `gpt-4o-mini`
-  - `gpt5-nano` → `gpt-4o-mini`
-  - `o4-mini` → `o4-mini`
-  - `DEFAULT_MODEL` はフレンドリ名または実モデルIDのどちらでも指定可。
+### AIチャット
+- OpenAI Responses API でのチャット
+- RAG 設定（Expander 内）
+  - `file_search` ツールを使い、選択した Vector Store を参照
+- 下部固定の入力欄（履歴が上に積み上がる UI）
+- チャット履歴のダウンロード: `md` / `json` / `txt`（改行コード: `CRLF` / `LF`）
+- 履歴クリアボタン
+
+### Web検索
+- Built-in `web_search` ツールを使用
+- モデルは実質 `gpt-5-mini` 固定
+
+### 画像生成
+- OpenAI Images API（`gpt-image-1`）で画像生成
+- 入力: プロンプト、サイズ（`1024x1024` / `1024x1536` / `1536x1024` / `auto`）
+- 出力: 画像の表示（複数の場合はグリッド表示）
+
+### RAG管理
+- Vector Store の一覧/作成/名称変更/削除
+- ファイルの一覧/追加/削除
+
+### 設定
+- モデル選択（AIチャット用）: `gpt-5` / `gpt-5-mini` / `gpt-5-nano` / `o4-mini`
+- ダウンロード設定（AIチャット履歴）: ファイルタイプ（`md` / `json` / `txt`）、改行コード（`CRLF` / `LF`）
+- 現在の設定の確認（JSON 表示）
+
+---
+
+## コード改修ツール
+2 タブ構成（`実行` / `設定`）。Responses API を 2 段階で使用します。
+
+### 実行タブ
+- 入力（ファイル 3 つ）
+  - INPUT1: 改修対象のソースコード（拡張子: `py` / `sql`）
+  - INPUT2: 設計書（改修前、拡張子: `txt` / `md`）
+  - INPUT3: 設計書（改修後、拡張子: `txt` / `md`）
+- 一括実行
+  1) INPUT2/INPUT3 の差分要約を生成（Step1）
+  2) Step1 の要約に基づき、INPUT1 のコードを改修（Step2）
+  3) 差分表示（unified diff）と修正後コードの表示/ダウンロード
+- ダウンロード
+  - 修正後コードは `modified_{元ファイル名}` でダウンロード
+  - 拡張子は INPUT1 に合わせて `py` / `sql`
+
+### 設定タブ
+- モデル選択（コード改修ツール用）: `gpt-5` / `gpt-5-mini` / `gpt-5-nano` / `o4-mini`
+- プロンプト編集
+  - Step1（設計差分抽出）用テンプレート（編集可能）
+  - Step2（コード改修）用テンプレート（編集可能）
+
+---
+
+## 補足
+- キャッシュや状態
+  - `st.session_state` と `st.cache_*` を適切に利用
+- エラー表示
+  - 直近のエラーは各画面上部に表示（`st.info` / `st.error`）
+- モデル名の表記
+  - 画像生成は UI 上の表記に関わらず `gpt-image-1` を使用
+
+## 既知の制限
+- 大きなファイルや長文入力はトークン制限により要約・分割が必要になる場合があります。
+- Web検索の結果はモデル応答に依存し、出典リンク等は応答内容により変化します。
