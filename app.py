@@ -303,7 +303,7 @@ def stream_response_text(
 def stream_web_search(query: str):
     client = get_client()
     with client.responses.stream(
-        model=resolve_model_for_api("gpt5-mini"),
+        model=resolve_model_for_api("gpt-5-mini"),
         input=[{"role": "user", "content": query}],
         tools=[{"type": "web_search"}],
     ) as stream:
@@ -511,20 +511,29 @@ def ui_ai_chat() -> None:
     col1, col2 = st.columns([2, 1])
     with col1:
         disabled = st.session_state.is_generating or len(st.session_state.messages) == 0
-        fmt = st.session_state.download_format
+        # 設定ウィジェットの値はスクリプト開始時に session_state に反映されるため
+        # Chat 側は settings_* を優先して参照し、一走遅れ問題を避ける
+        fmt = st.session_state.get("settings_download_format", st.session_state.download_format)
+        nl = st.session_state.get("settings_newline", st.session_state.newline)
+        # prepare data and mime per format
         if fmt == "md":
-            data = to_markdown(st.session_state.messages, st.session_state.newline)
+            data = to_markdown(st.session_state.messages, nl)
+            mime = "text/markdown"
         elif fmt == "json":
-            data = to_json(st.session_state.messages, st.session_state.newline)
+            data = to_json(st.session_state.messages, nl)
+            mime = "application/json"
         else:
-            data = to_txt(st.session_state.messages, st.session_state.newline)
+            data = to_txt(st.session_state.messages, nl)
+            mime = "text/plain"
+        # ダウンロードボタンのキーを設定に連動させ、設定変更直後の初回ダウンロードでも反映されるようにする
+        download_key = f"chat_download_btn_{fmt}_{nl}"
         st.download_button(
             label="チャット履歴をダウンロード",
             data=data if not st.session_state.is_generating else None,
             file_name=f"chat_{int(time.time())}.{fmt}",
-            mime="text/plain",
+            mime=mime,
             disabled=disabled,
-            key="chat_download_btn",
+            key=download_key,
         )
     with col2:
         if st.button("履歴クリア", disabled=st.session_state.is_generating, key="clear_history_btn"):
@@ -730,7 +739,7 @@ def ui_web_search() -> None:
 
 
 def ui_image_generation() -> None:
-    st.subheader("画像生成（gpt-5-nano固定）")
+    st.subheader("画像生成（gpt-image-1固定）")
     if st.session_state.last_image_error:
         st.info(f"直前のエラー: {st.session_state.last_image_error}")
 
@@ -901,7 +910,7 @@ def ui_settings() -> None:
         index=MODEL_OPTIONS.index(st.session_state.model)
         if st.session_state.model in MODEL_OPTIONS
         else MODEL_OPTIONS.index(normalize_model_for_ui(DEFAULT_MODEL_RAW)),
-        help="既定は gpt5-mini。選択: gpt5 / gpt5-mini / gpt5-nano / o4-mini",
+        help="既定は gpt-5-mini。選択: gpt-5 / gpt-5-mini / gpt-5-nano / o4-mini",
         key="settings_model",
     )
 
@@ -929,6 +938,10 @@ def main() -> None:
     st.set_page_config(page_title="Internal AI Tool", layout="wide")
     init_session_state()
 
+    # Quick check for API key presence to help first-time setup
+    if not os.getenv("OPENAI_API_KEY"):
+        st.warning("OPENAI_API_KEY が未設定です。.env を確認してください。")
+
     st.sidebar.header("AIツール")
     sidebar_settings()
     # コード改修ツールが選択されている場合は専用画面を表示
@@ -937,6 +950,10 @@ def main() -> None:
         return
 
     tabs = st.tabs(["AIチャット", "Web検索", "画像生成", "RAG管理", "設定"])
+    # 設定タブを先に評価して、他タブで最新設定が使われるようにする
+    with tabs[4]:
+        ui_settings()
+
     with tabs[0]:
         ui_ai_chat()
     with tabs[1]:
@@ -945,9 +962,6 @@ def main() -> None:
         ui_image_generation()
     with tabs[3]:
         ui_rag_management()
-
-    with tabs[4]:
-        ui_settings()
 
 
 if __name__ == "__main__":
