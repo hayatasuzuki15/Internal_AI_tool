@@ -136,6 +136,16 @@ def init_session_state() -> None:
         st.session_state.code_fix_diff = ""
     if "code_fix_last_error" not in st.session_state:
         st.session_state.code_fix_last_error = None
+    # Follow-up Q&A (for code-fix tool)
+    if "code_fix_followup_messages" not in st.session_state:
+        st.session_state.code_fix_followup_messages: List[Dict[str, Any]] = []
+    if "code_fix_followup_is_running" not in st.session_state:
+        st.session_state.code_fix_followup_is_running = False
+    if "code_fix_followup_last_error" not in st.session_state:
+        st.session_state.code_fix_followup_last_error = None
+    # Full log of code-fix API calls
+    if "code_fix_log" not in st.session_state:
+        st.session_state.code_fix_log: List[Dict[str, Any]] = []
 
 
 def nl_join(s: str, newline: str) -> str:
@@ -177,6 +187,99 @@ def to_json(messages: List[Dict[str, Any]], newline: str) -> bytes:
     return nl_join(body, newline).encode("utf-8")
 
 
+# -----------------------------
+# Code-fix: history serializers
+# -----------------------------
+def codefix_log_to_json(entries: List[Dict[str, Any]], newline: str) -> bytes:
+    def _stringify(v: Any) -> Any:
+        if isinstance(v, (str, int, float, bool)) or v is None:
+            return v
+        try:
+            return str(v)
+        except Exception:
+            return ""
+
+    safe = []
+    for e in entries:
+        safe.append({
+            "stage": _stringify(e.get("stage")),
+            "ts": _stringify(e.get("ts")),
+            "model": _stringify(e.get("model")),
+            "request": {
+                "system": _stringify((e.get("request") or {}).get("system")),
+                "user": _stringify((e.get("request") or {}).get("user")),
+                "context_code": _stringify((e.get("request") or {}).get("context_code")),
+            },
+            "response": _stringify(e.get("response")),
+            "error": _stringify(e.get("error")),
+        })
+    body = json.dumps(safe, ensure_ascii=False, indent=2)
+    return nl_join(body, newline).encode("utf-8")
+
+
+def codefix_log_to_markdown(entries: List[Dict[str, Any]], newline: str) -> bytes:
+    lines: List[str] = ["# Code Fix Tool History"]
+    for i, e in enumerate(entries, start=1):
+        stage = str(e.get("stage", ""))
+        ts = str(e.get("ts", ""))
+        model = str(e.get("model", ""))
+        req = e.get("request", {}) or {}
+        system = str(req.get("system", ""))
+        user = str(req.get("user", ""))
+        ctx = str(req.get("context_code", ""))
+        resp = str(e.get("response", ""))
+        err = str(e.get("error", ""))
+
+        lines.append(f"\n## {i}. {stage}")
+        meta = []
+        if ts:
+            meta.append(f"Time: {ts}")
+        if model:
+            meta.append(f"Model: {model}")
+        if meta:
+            lines.append("- " + " | ".join(meta))
+
+        lines.append("\n### Request")
+        if system:
+            lines.append("System:\n")
+            lines.append(system)
+        if user:
+            lines.append("\nUser:\n")
+            lines.append(user)
+        if ctx:
+            lines.append("\nContext Code:\n")
+            lines.append("```\n" + ctx + "\n```")
+
+        if resp:
+            lines.append("\n### Response\n")
+            lines.append("```\n" + resp + "\n```")
+        if err:
+            lines.append("\n### Error\n")
+            lines.append(err)
+
+    body = "\n".join(lines)
+    return nl_join(body, newline).encode("utf-8")
+
+
+def codefix_log_to_txt(entries: List[Dict[str, Any]], newline: str) -> bytes:
+    parts: List[str] = []
+    for i, e in enumerate(entries, start=1):
+        parts.append(f"[{i}] {e.get('stage','')}")
+        parts.append(f"Time: {e.get('ts','')} | Model: {e.get('model','')}")
+        req = e.get("request", {}) or {}
+        if req.get("system"):
+            parts.append("System:\n" + str(req.get("system")))
+        if req.get("user"):
+            parts.append("User:\n" + str(req.get("user")))
+        if req.get("context_code"):
+            parts.append("Context Code:\n" + str(req.get("context_code")))
+        if e.get("response"):
+            parts.append("Response:\n" + str(e.get("response")))
+        if e.get("error"):
+            parts.append("Error:\n" + str(e.get("error")))
+        parts.append("")
+    body = "\n".join(parts)
+    return nl_join(body, newline).encode("utf-8")
 # -----------------------------
 # Cached data accessors
 # -----------------------------
@@ -529,7 +632,7 @@ def ui_ai_chat() -> None:
         download_key = f"chat_download_btn_{fmt}_{nl}"
         st.download_button(
             label="チャット履歴をダウンロード",
-            data=data if not st.session_state.is_generating else None,
+            data=data if not st.session_state.is_generating else b'',
             file_name=f"chat_{int(time.time())}.{fmt}",
             mime=mime,
             disabled=disabled,
@@ -625,6 +728,8 @@ def ui_applied_tools() -> None:
             else:
                 st.session_state.code_fix_is_running = True
                 st.session_state.code_fix_last_error = None
+                # Start fresh log for this run
+                st.session_state.code_fix_log = []
                 try:
                     # 読み込み
                     code_text = _read_uploaded_text(f_code)
@@ -649,6 +754,22 @@ def ui_applied_tools() -> None:
                     )
                     summary = getattr(resp1, "output_text", None) or ""
                     st.session_state.code_fix_summary = summary
+                    # Log: 設計書比較（Step1）
+                    try:
+                        st.session_state.code_fix_log.append(
+                            {
+                                "stage": "設計書比較",
+                                "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                "model": resolve_model_for_api(st.session_state.code_fix_model),
+                                "request": {
+                                    "system": st.session_state.code_fix_prompt_step1,
+                                    "user": step1_input[1]["content"],
+                                },
+                                "response": summary,
+                            }
+                        )
+                    except Exception:
+                        pass
 
                     # Step2: コード改修
                     step2_input = [
@@ -668,16 +789,37 @@ def ui_applied_tools() -> None:
                     modified = getattr(resp2, "output_text", None) or ""
                     modified = _strip_code_fences(modified)
                     st.session_state.code_fix_modified_code = modified
+                    # Log: コード修正（Step2）
+                    try:
+                        st.session_state.code_fix_log.append(
+                            {
+                                "stage": "コード修正",
+                                "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                "model": resolve_model_for_api(st.session_state.code_fix_model),
+                                "request": {
+                                    "system": st.session_state.code_fix_prompt_step2,
+                                    "user": step2_input[1]["content"],
+                                    "context_code": code_text,
+                                },
+                                "response": modified,
+                            }
+                        )
+                    except Exception:
+                        pass
 
                     # Diff
                     diff_text = _unified_diff(code_text, modified, f_code.name)
                     st.session_state.code_fix_diff = diff_text
+                    # Reset follow-up history on fresh run
+                    st.session_state.code_fix_followup_messages = []
                 except Exception as e:
                     st.session_state.code_fix_last_error = str(e)
                 finally:
                     st.session_state.code_fix_is_running = False
 
         # 結果表示
+        if st.session_state.get("code_fix_log"):
+            ui_code_fix_full_log_download()
         if st.session_state.code_fix_summary:
             st.markdown("### 変更点の要約")
             st.text_area("要約", value=st.session_state.code_fix_summary, height=200, key="code_fix_summary_view")
@@ -702,6 +844,171 @@ def ui_applied_tools() -> None:
                 mime="text/plain",
                 key="code_fix_download_btn",
             )
+            # Follow-up editor
+            ui_code_fix_followups(f_code)
+
+def ui_code_fix_full_log_download() -> None:
+    """Render a download button for the entire code-fix history (Step1/Step2/follow-ups)."""
+    entries = st.session_state.get("code_fix_log", []) or []
+    fmt = st.session_state.get("settings_download_format", st.session_state.download_format)
+    nl = st.session_state.get("settings_newline", st.session_state.newline)
+    if fmt == "md":
+        data = codefix_log_to_markdown(entries, nl)
+        mime = "text/markdown"
+    elif fmt == "json":
+        data = codefix_log_to_json(entries, nl)
+        mime = "application/json"
+    else:
+        data = codefix_log_to_txt(entries, nl)
+        mime = "text/plain"
+    st.markdown("---")
+    st.markdown("### コード改修ツールの全履歴ダウンロード")
+    st.download_button(
+        label="全履歴をダウンロード",
+        data=data if entries else b"",
+        file_name=f"codefix_full_history_{int(time.time())}.{fmt}",
+        mime=mime,
+        disabled=len(entries) == 0,
+        key=f"codefix_full_log_{fmt}_{nl}",
+    )
+
+
+def ui_code_fix_followups(f_code) -> None:
+    """Render follow-up Q&A section for code-fix tool."""
+
+    def _strip_code_fences(s: str) -> str:
+        t = s.strip()
+        if t.startswith("```") and t.endswith("```"):
+            t = t[3:]
+            if "\n" in t:
+                t = t.split("\n", 1)[1]
+            t = t.rsplit("```", 1)[0] if t.endswith("```") else t
+        return t
+
+    def _unified_diff(src: str, dst: str, src_name: str) -> str:
+        to_name = f"modified_{src_name}" if src_name else "modified_code"
+        diff = difflib.unified_diff(
+            src.splitlines(),
+            dst.splitlines(),
+            fromfile=src_name or "original",
+            tofile=to_name,
+            lineterm="",
+        )
+        return "\n".join(diff)
+    if not st.session_state.code_fix_modified_code:
+        return
+
+    st.markdown("---")
+    st.markdown("### 追い質問（コードへの追加修正）")
+
+    # Render follow-up history
+    for m in st.session_state.code_fix_followup_messages:
+        role = m.get("role", "assistant")
+        content = str(m.get("content", ""))
+        with st.chat_message(role):
+            st.markdown(content)
+
+    # Download follow-up history using global format settings
+    fmt = st.session_state.get("settings_download_format", st.session_state.download_format)
+    nl = st.session_state.get("settings_newline", st.session_state.newline)
+    if fmt == "md":
+        log_bytes = to_markdown(st.session_state.code_fix_followup_messages, nl)
+        mime = "text/markdown"
+    elif fmt == "json":
+        log_bytes = to_json(st.session_state.code_fix_followup_messages, nl)
+        mime = "application/json"
+    else:
+        log_bytes = to_txt(st.session_state.code_fix_followup_messages, nl)
+        mime = "text/plain"
+    st.download_button(
+        label="追い質問履歴をダウンロード",
+        data=log_bytes if st.session_state.code_fix_followup_messages else b'',
+        file_name=f"codefix_followups_{int(time.time())}.{fmt}",
+        mime=mime,
+        disabled=len(st.session_state.code_fix_followup_messages) == 0,
+        key=f"codefix_log_download_{fmt}_{nl}",
+    )
+
+    # Follow-up input
+    follow_text = st.chat_input(
+        "この出力コードに対する追加の要望や修正指示を入力",
+        disabled=st.session_state.code_fix_is_running or st.session_state.code_fix_followup_is_running,
+    )
+
+    if follow_text and not st.session_state.code_fix_followup_is_running:
+        st.session_state.code_fix_followup_messages.append({
+            "role": "user",
+            "content": follow_text,
+            "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        })
+
+        st.session_state.code_fix_followup_is_running = True
+        st.session_state.code_fix_followup_last_error = None
+
+        with st.chat_message("assistant"):
+            placeholder = st.empty()
+            try:
+                client = get_client()
+                system_prompt = (
+                    (st.session_state.code_fix_prompt_step2 or "").strip()
+                    + "\n\n# 出力ルール\n"
+                      "- 必ず修正後の完全なコードのみを出力する\n"
+                      "- 解説・前置き・コードフェンス( ``` )は出力しない\n"
+                )
+                user_payload = (
+                    "[現在のコード]\n" + st.session_state.code_fix_modified_code + "\n\n"
+                    + "[ユーザーの要望]\n" + follow_text
+                )
+                resp = client.responses.create(
+                    model=resolve_model_for_api(st.session_state.code_fix_model),
+                    input=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_payload},
+                    ],
+                )
+                new_code = getattr(resp, "output_text", None) or ""
+                new_code = _strip_code_fences(new_code)
+
+                if not new_code.strip():
+                    raise RuntimeError("追い質問の応答にコードが含まれていません。プロンプトを見直してください。")
+
+                prev_code = st.session_state.code_fix_modified_code
+                diff_text = _unified_diff(prev_code, new_code, f_code.name if f_code else "code")
+                st.session_state.code_fix_modified_code = new_code
+                st.session_state.code_fix_diff = diff_text
+
+                st.session_state.code_fix_followup_messages.append({
+                    "role": "assistant",
+                    "content": new_code,
+                    "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                })
+
+                # Log: 追いチャット
+                try:
+                    st.session_state.code_fix_log.append(
+                        {
+                            "stage": "追いチャット",
+                            "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            "model": resolve_model_for_api(st.session_state.code_fix_model),
+                            "request": {
+                                "system": system_prompt,
+                                "user": follow_text,
+                                "context_code": prev_code,
+                            },
+                            "response": new_code,
+                        }
+                    )
+                except Exception:
+                    pass
+
+                placeholder.markdown("(修正後コードを反映しました)")
+            except Exception as e:
+                st.session_state.code_fix_followup_last_error = str(e)
+                placeholder.error(st.session_state.code_fix_followup_last_error)
+            finally:
+                st.session_state.code_fix_followup_is_running = False
+                st.rerun()
+
 
 def ui_web_search() -> None:
     st.subheader("Web検索（gpt-5-mini固定）")
