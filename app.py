@@ -15,6 +15,7 @@ from openai.lib.streaming.responses import (
     ResponseTextDeltaEvent,
     ResponseTextDoneEvent,
 )
+from streamlit.runtime import exists as runtime_exists
 
 # -----------------------------
 # Env & client setup
@@ -1272,4 +1273,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    if not runtime_exists():
+        print("このアプリは 'streamlit run app.py' で実行してください。")
+    else:
+        main()
